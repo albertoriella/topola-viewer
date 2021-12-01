@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 
 echo Copying files...
 lftp --env-password sftp://wiech13@apps.wikitree.com << EOF
