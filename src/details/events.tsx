@@ -1,11 +1,35 @@
+import * as queryString from 'query-string';
 import flatMap from 'array.prototype.flatmap';
+import {calcAge} from '../util/age_util';
 import {compareDates, translateDate} from '../util/date_util';
 import {DateOrRange, getDate} from 'topola';
-import {dereference, GedcomData, getData} from '../util/gedcom_util';
+import {dereference, GedcomData, getData, getName} from '../util/gedcom_util';
 import {GedcomEntry} from 'parse-gedcom';
 import {IntlShape, useIntl} from 'react-intl';
+import {Link, useLocation} from 'react-router-dom';
 import {MultilineText} from './multiline-text';
+import {pointerToId} from '../util/gedcom_util';
 import {TranslatedTag} from './translated-tag';
+
+function PersonLink(props: {person: GedcomEntry}) {
+  const location = useLocation();
+
+  const name = getName(props.person);
+  if (!name) {
+    return <></>;
+  }
+
+  const search = queryString.parse(location.search);
+  search['indi'] = pointerToId(props.person.pointer);
+
+  return (
+    <div className="meta">
+      <Link to={{pathname: '/view', search: queryString.stringify(search)}}>
+        {name}
+      </Link>
+    </div>
+  );
+}
 
 interface Props {
   gedcom: GedcomData;
@@ -60,21 +84,36 @@ function eventFamilyDetails(
     .find((familySubEntry) => !familySubEntry.data.includes(indi));
 
   if (spouseReference) {
-    const spouseName = dereference(
+    const spouse = dereference(
       spouseReference,
       gedcom,
       (gedcom) => gedcom.indis,
-    )
-      .tree.filter((subEntry) => subEntry.tag === 'NAME')
-      .find(
-        (subEntry) =>
-          subEntry.tree.filter(
-            (nameEntry) =>
-              nameEntry.tag === 'TYPE' && nameEntry.data === 'married',
-          ).length === 0,
+    );
+    return <PersonLink person={spouse} />;
+  }
+  return null;
+}
+
+function eventAdditionalDetails(
+  eventEntry: GedcomEntry,
+  indi: string,
+  gedcom: GedcomData,
+  intl: IntlShape,
+) {
+  if (eventEntry.tag === 'DEAT') {
+    const deathDate = resolveDate(eventEntry);
+
+    const birthDate = gedcom.indis[indi].tree
+      .filter((indiSubEntry) => indiSubEntry.tag === 'BIRT')
+      .map((birthEvent) => resolveDate(birthEvent))
+      .find((topolaDate) => topolaDate);
+
+    if (birthDate && deathDate) {
+      return (
+        <div className="meta">
+          {calcAge(birthDate?.data, deathDate?.data, intl)}
+        </div>
       );
-    if (spouseName) {
-      return <div className="meta">{spouseName.data.replaceAll('/', '')}</div>;
     }
   }
   return null;
@@ -151,7 +190,7 @@ function toIndiEvent(
       date: date ? getDate(date.data) : undefined,
       type: entry.tag,
       header: eventHeader(entry.tag, date, intl),
-      subHeader: null,
+      subHeader: eventAdditionalDetails(entry, indi, gedcom, intl),
       place: eventPlace(entry),
       notes: eventNotes(entry, gedcom),
     },
