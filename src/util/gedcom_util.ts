@@ -1,13 +1,13 @@
 import {GedcomEntry, parse as parseGedcom} from 'parse-gedcom';
 import {TopolaError} from './error';
 import {
+  gedcomEntriesToJson,
   JsonFam,
   JsonGedcomData,
-  JsonIndi,
-  gedcomEntriesToJson,
   JsonImage,
-  JsonEvent,
+  JsonIndi,
 } from 'topola';
+import {compareDates} from './date_util';
 
 export interface GedcomData {
   /** The HEAD entry. */
@@ -72,33 +72,6 @@ function strcmp(a: string, b: string) {
   }
   if (a > b) {
     return 1;
-  }
-  return 0;
-}
-
-/** Compares dates of the given events. */
-function compareDates(
-  event1: JsonEvent | undefined,
-  event2: JsonEvent | undefined,
-): number {
-  const date1 =
-    event1 && (event1.date || (event1.dateRange && event1.dateRange.from));
-  const date2 =
-    event2 && (event2.date || (event2.dateRange && event2.dateRange.from));
-  if (!date1 || !date1.year || !date2 || !date2.year) {
-    return 0;
-  }
-  if (date1.year !== date2.year) {
-    return date1.year - date2.year;
-  }
-  if (!date1.month || !date2.month) {
-    return 0;
-  }
-  if (date1.month !== date2.month) {
-    return date1.month - date2.month;
-  }
-  if (date1.day && date2.day && date1.day !== date2.day) {
-    return date1.month - date2.month;
   }
   return 0;
 }
@@ -179,15 +152,50 @@ function sortSpouses(gedcom: JsonGedcomData): JsonGedcomData {
   return Object.assign({}, gedcom, {indis: newIndis});
 }
 
+/**
+ * If the entry is a reference to a top-level entry, the referenced entry is
+ * returned. Otherwise, returns the given entry unmodified.
+ */
+export function dereference(
+  entry: GedcomEntry,
+  gedcom: GedcomData,
+  getterFunction: (gedcom: GedcomData) => {[key: string]: GedcomEntry},
+) {
+  if (entry.data) {
+    const dereferenced = getterFunction(gedcom)[pointerToId(entry.data)];
+    if (dereferenced) {
+      return dereferenced;
+    }
+  }
+  return entry;
+}
+
+/**
+ * Returns the data for the given GEDCOM entry as an array of lines. Supports
+ * continuations with CONT and CONC.
+ */
+export function getData(entry: GedcomEntry) {
+  const result = [entry.data];
+  entry.tree.forEach((subentry) => {
+    if (subentry.tag === 'CONC' && subentry.data) {
+      const last = result.length - 1;
+      result[last] += subentry.data;
+    } else if (subentry.tag === 'CONT' && subentry.data) {
+      result.push(subentry.data);
+    }
+  });
+  return result;
+}
+
 /** Sorts children and spouses. */
 export function normalizeGedcom(gedcom: JsonGedcomData): JsonGedcomData {
   return sortSpouses(sortChildren(gedcom));
 }
 
-const IMAGE_EXTENSIONS = ['.jpg', '.png', '.gif'];
+const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif'];
 
 /** Returns true if the given file name has a known image extension. */
-function isImageFile(fileName: string): boolean {
+export function isImageFile(fileName: string): boolean {
   const lowerName = fileName.toLowerCase();
   return IMAGE_EXTENSIONS.some((ext) => lowerName.endsWith(ext));
 }
@@ -261,4 +269,25 @@ export function getSoftware(head: GedcomEntry): string | null {
   const name =
     sour && sour.tree && sour.tree.find((entry) => entry.tag === 'NAME');
   return (name && name.data) || null;
+}
+
+export function getName(person: GedcomEntry): string | undefined {
+  const names = person.tree.filter((subEntry) => subEntry.tag === 'NAME');
+  const notMarriedName = names.find(
+    (subEntry) =>
+      subEntry.tree.filter(
+        (nameEntry) => nameEntry.tag === 'TYPE' && nameEntry.data === 'married',
+      ).length === 0,
+  );
+  const name = notMarriedName || names[0];
+  return name?.data.replace(/\//g, '');
+}
+
+export function getFileName(fileEntry: GedcomEntry): string | undefined {
+  const fileTitle = fileEntry?.tree.find((entry) => entry.tag === 'TITL')?.data;
+
+  const fileExtension = fileEntry?.tree.find((entry) => entry.tag === 'FORM')
+    ?.data;
+
+  return fileTitle && fileExtension && fileTitle + '.' + fileExtension;
 }

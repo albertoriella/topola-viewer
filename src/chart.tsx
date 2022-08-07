@@ -1,10 +1,11 @@
-import * as React from 'react';
-import {injectIntl, WrappedComponentProps} from 'react-intl';
+import {ChartColors} from './config';
 import {interpolateNumber} from 'd3-interpolate';
+import {IntlShape, useIntl} from 'react-intl';
 import {max, min} from 'd3-array';
 import {Media} from './util/media';
 import {saveAs} from 'file-saver';
 import {select, Selection} from 'd3-selection';
+import {useEffect, useRef} from 'react';
 import 'd3-transition';
 import {
   D3ZoomEvent,
@@ -23,6 +24,7 @@ import {
   RelativesChart,
   FancyChart,
   CircleRenderer,
+  ChartColors as TopolaChartColors,
 } from 'topola';
 
 /** How much to zoom when using the +/- buttons. */
@@ -105,7 +107,7 @@ function loadImage(blob: Blob): Promise<HTMLImageElement> {
 }
 
 /** Draw image on a new canvas and return the canvas. */
-function drawOnCanvas(image: HTMLImageElement) {
+function drawImageOnCanvas(image: HTMLImageElement) {
   const canvas = document.createElement('canvas');
   // Scale image for better quality.
   canvas.width = image.width * 2;
@@ -133,11 +135,119 @@ function canvasToBlob(canvas: HTMLCanvasElement, type: string) {
   });
 }
 
+/** Return a copy of the SVG chart but without scaling and positioning. */
+function getStrippedSvg() {
+  const svg = document.getElementById('chartSvg')!.cloneNode(true) as Element;
+
+  svg.removeAttribute('transform');
+  const parent = select('#svgContainer').node() as Element;
+  const scale = zoomTransform(parent).k;
+  svg.setAttribute('width', String(Number(svg.getAttribute('width')) / scale));
+  svg.setAttribute(
+    'height',
+    String(Number(svg.getAttribute('height')) / scale),
+  );
+  svg.querySelector('#chart')!.removeAttribute('transform');
+
+  return svg;
+}
+
+function getSvgContents() {
+  return new XMLSerializer().serializeToString(getStrippedSvg());
+}
+
+async function getSvgContentsWithInlinedImages() {
+  const svg = getStrippedSvg();
+  await inlineImages(svg);
+  return new XMLSerializer().serializeToString(svg);
+}
+
+/** Shows the print dialog to print the currently displayed chart. */
+export function printChart() {
+  const printWindow = document.createElement('iframe');
+  printWindow.style.position = 'absolute';
+  printWindow.style.top = '-1000px';
+  printWindow.style.left = '-1000px';
+  printWindow.onload = () => {
+    printWindow.contentDocument!.open();
+    printWindow.contentDocument!.write(getSvgContents());
+    printWindow.contentDocument!.close();
+    // Doesn't work on Firefox without the setTimeout.
+    setTimeout(() => {
+      printWindow.contentWindow!.focus();
+      printWindow.contentWindow!.print();
+      printWindow.parentNode!.removeChild(printWindow);
+    }, 500);
+  };
+  document.body.appendChild(printWindow);
+}
+
+export async function downloadSvg() {
+  const contents = await getSvgContentsWithInlinedImages();
+  const blob = new Blob([contents], {type: 'image/svg+xml'});
+  saveAs(blob, 'topola.svg');
+}
+
+async function drawOnCanvas(): Promise<HTMLCanvasElement> {
+  const contents = await getSvgContentsWithInlinedImages();
+  const blob = new Blob([contents], {type: 'image/svg+xml'});
+  return drawImageOnCanvas(await loadImage(blob));
+}
+
+export async function downloadPng() {
+  const canvas = await drawOnCanvas();
+  const blob = await canvasToBlob(canvas, 'image/png');
+  saveAs(blob, 'topola.png');
+}
+
+export async function downloadPdf() {
+  // Lazy load jspdf.
+  const {default: jspdf} = await import('jspdf');
+  const canvas = await drawOnCanvas();
+  const doc = new jspdf({
+    orientation: canvas.width > canvas.height ? 'l' : 'p',
+    unit: 'pt',
+    format: [canvas.width, canvas.height],
+  });
+  doc.addImage(canvas, 'PNG', 0, 0, canvas.width, canvas.height, 'NONE');
+  doc.save('topola.pdf');
+}
+
 /** Supported chart types. */
 export enum ChartType {
   Hourglass,
   Relatives,
   Fancy,
+}
+
+const chartColors = new Map<ChartColors, TopolaChartColors>([
+  [ChartColors.NO_COLOR, TopolaChartColors.NO_COLOR],
+  [ChartColors.COLOR_BY_GENERATION, TopolaChartColors.COLOR_BY_GENERATION],
+  [ChartColors.COLOR_BY_SEX, TopolaChartColors.COLOR_BY_SEX],
+]);
+
+function getChartType(chartType: ChartType) {
+  switch (chartType) {
+    case ChartType.Hourglass:
+      return HourglassChart;
+    case ChartType.Relatives:
+      return RelativesChart;
+    case ChartType.Fancy:
+      return FancyChart;
+    default:
+      // Fall back to hourglass chart.
+      return HourglassChart;
+  }
+}
+
+function getRendererType(chartType: ChartType) {
+  switch (chartType) {
+    case ChartType.Fancy:
+      return CircleRenderer;
+    default:
+      // Use DetailedRenderer by default.
+      return DetailedRenderer;
+  }
 }
 
 export interface ChartProps {
@@ -146,13 +256,10 @@ export interface ChartProps {
   chartType: ChartType;
   onSelection: (indiInfo: IndiInfo) => void;
   freezeAnimation?: boolean;
+  colors?: ChartColors;
 }
 
-/** Component showing the genealogy chart and handling transition animations. */
-export class ChartComponent extends React.PureComponent<
-  ChartProps & WrappedComponentProps,
-  {}
-> {
+class ChartWrapper {
   private chart?: ChartHandle;
   /** Animation is in progress. */
   private animating = false;
@@ -160,32 +267,11 @@ export class ChartComponent extends React.PureComponent<
   private rerenderRequired = false;
   /** The d3 zoom behavior object. */
   private zoomBehavior?: ZoomBehavior<Element, any>;
+  /** Props that will be used for rerendering. */
+  private rerenderProps?: ChartProps;
+  private rerenderResetPosition?: boolean;
 
-  private getChartType() {
-    switch (this.props.chartType) {
-      case ChartType.Hourglass:
-        return HourglassChart;
-      case ChartType.Relatives:
-        return RelativesChart;
-      case ChartType.Fancy:
-        return FancyChart;
-      default:
-        // Fall back to hourglass chart.
-        return HourglassChart;
-    }
-  }
-
-  private getRendererType() {
-    switch (this.props.chartType) {
-      case ChartType.Fancy:
-        return CircleRenderer;
-      default:
-        // Use DetailedRenderer by default.
-        return DetailedRenderer;
-    }
-  }
-
-  private zoom(factor: number) {
+  zoom(factor: number) {
     const parent = select('#svgContainer') as Selection<Element, any, any, any>;
     this.zoomBehavior!.scaleBy(parent, factor);
   }
@@ -195,36 +281,46 @@ export class ChartComponent extends React.PureComponent<
    * If indiInfo is not given, it means that it is the initial render and no
    * animation is performed.
    */
-  private renderChart(args: {initialRender: boolean} = {initialRender: false}) {
+  renderChart(
+    props: ChartProps,
+    intl: IntlShape,
+    args: {initialRender: boolean; resetPosition: boolean} = {
+      initialRender: false,
+      resetPosition: false,
+    },
+  ) {
     // Wait for animation to finish if animation is in progress.
     if (!args.initialRender && this.animating) {
       this.rerenderRequired = true;
+      this.rerenderProps = props;
+      this.rerenderResetPosition = args.resetPosition;
       return;
     }
 
     // Freeze changing selection after initial rendering.
-    if (!args.initialRender && this.props.freezeAnimation) {
+    if (!args.initialRender && props.freezeAnimation) {
       return;
     }
 
     if (args.initialRender) {
       (select('#chart').node() as HTMLElement).innerHTML = '';
       this.chart = createChart({
-        json: this.props.data,
-        chartType: this.getChartType(),
-        renderer: this.getRendererType(),
+        json: props.data,
+        chartType: getChartType(props.chartType),
+        renderer: getRendererType(props.chartType),
         svgSelector: '#chart',
-        indiCallback: (info) => this.props.onSelection(info),
+        indiCallback: (info) => props.onSelection(info),
+        colors: chartColors.get(props.colors!),
         animate: true,
         updateSvgSize: false,
-        locale: this.props.intl.locale,
+        locale: intl.locale,
       });
     } else {
-      this.chart!.setData(this.props.data);
+      this.chart!.setData(props.data);
     }
     const chartInfo = this.chart!.render({
-      startIndi: this.props.selection.id,
-      baseGeneration: this.props.selection.generation,
+      startIndi: props.selection.id,
+      baseGeneration: props.selection.generation,
     });
     const svg = select('#chartSvg');
     const parent = select('#svgContainer').node() as Element;
@@ -277,13 +373,15 @@ export class ChartComponent extends React.PureComponent<
       .attr('transform', `translate(${offsetX}, ${offsetY})`)
       .attr('width', chartInfo.size[0] * scale)
       .attr('height', chartInfo.size[1] * scale);
-    if (args.initialRender) {
-      parent.scrollLeft = -dx;
-      parent.scrollTop = -dy;
-    } else {
-      svgTransition
-        .tween('scrollLeft', scrollLeftTween(-dx))
-        .tween('scrollTop', scrollTopTween(-dy));
+    if (args.resetPosition) {
+      if (args.initialRender) {
+        parent.scrollLeft = -dx;
+        parent.scrollTop = -dy;
+      } else {
+        svgTransition
+          .tween('scrollLeft', scrollLeftTween(-dx))
+          .tween('scrollTop', scrollTopTween(-dy));
+      }
     }
 
     // After the animation is finished, rerender the chart if required.
@@ -292,120 +390,70 @@ export class ChartComponent extends React.PureComponent<
       this.animating = false;
       if (this.rerenderRequired) {
         this.rerenderRequired = false;
-        this.renderChart({initialRender: false});
+        // Use `this.rerenderProps` instead of the props in scope because
+        // the props may have been updated in the meantime.
+        this.renderChart(this.rerenderProps!, intl, {
+          initialRender: false,
+          resetPosition: !!this.rerenderResetPosition,
+        });
       }
     });
   }
-
-  componentDidMount() {
-    this.renderChart({initialRender: true});
-  }
-
-  componentDidUpdate(prevProps: ChartProps) {
-    const initialRender = this.props.chartType !== prevProps.chartType;
-    this.renderChart({initialRender});
-  }
-
-  render() {
-    return (
-      <div id="svgContainer">
-        <Media at="large" className="zoom">
-          <button className="zoom-in" onClick={() => this.zoom(ZOOM_FACTOR)}>
-            +
-          </button>
-          <button
-            className="zoom-out"
-            onClick={() => this.zoom(1 / ZOOM_FACTOR)}
-          >
-            −
-          </button>
-        </Media>
-        <svg id="chartSvg">
-          <g id="chart" />
-        </svg>
-      </div>
-    );
-  }
-
-  /** Return a copy of the SVG chart but without scaling and positioning. */
-  private getStrippedSvg() {
-    const svg = document.getElementById('chartSvg')!.cloneNode(true) as Element;
-
-    svg.removeAttribute('transform');
-    const parent = select('#svgContainer').node() as Element;
-    const scale = zoomTransform(parent).k;
-    svg.setAttribute(
-      'width',
-      String(Number(svg.getAttribute('width')) / scale),
-    );
-    svg.setAttribute(
-      'height',
-      String(Number(svg.getAttribute('height')) / scale),
-    );
-    svg.querySelector('#chart')!.removeAttribute('transform');
-
-    return svg;
-  }
-
-  private getSvgContents() {
-    return new XMLSerializer().serializeToString(this.getStrippedSvg());
-  }
-
-  private async getSvgContentsWithInlinedImages() {
-    const svg = this.getStrippedSvg();
-    await inlineImages(svg);
-    return new XMLSerializer().serializeToString(svg);
-  }
-
-  /** Shows the print dialog to print the currently displayed chart. */
-  print() {
-    const printWindow = document.createElement('iframe');
-    printWindow.style.position = 'absolute';
-    printWindow.style.top = '-1000px';
-    printWindow.style.left = '-1000px';
-    printWindow.onload = () => {
-      printWindow.contentDocument!.open();
-      printWindow.contentDocument!.write(this.getSvgContents());
-      printWindow.contentDocument!.close();
-      // Doesn't work on Firefox without the setTimeout.
-      setTimeout(() => {
-        printWindow.contentWindow!.focus();
-        printWindow.contentWindow!.print();
-        printWindow.parentNode!.removeChild(printWindow);
-      }, 500);
-    };
-    document.body.appendChild(printWindow);
-  }
-
-  async downloadSvg() {
-    const contents = await this.getSvgContentsWithInlinedImages();
-    const blob = new Blob([contents], {type: 'image/svg+xml'});
-    saveAs(blob, 'topola.svg');
-  }
-
-  private async drawOnCanvas(): Promise<HTMLCanvasElement> {
-    const contents = await this.getSvgContentsWithInlinedImages();
-    const blob = new Blob([contents], {type: 'image/svg+xml'});
-    return await drawOnCanvas(await loadImage(blob));
-  }
-
-  async downloadPng() {
-    const canvas = await this.drawOnCanvas();
-    const blob = await canvasToBlob(canvas, 'image/png');
-    saveAs(blob, 'topola.png');
-  }
-
-  async downloadPdf() {
-    // Lazy load jspdf.
-    const {default: jspdf} = await import('jspdf');
-    const canvas = await this.drawOnCanvas();
-    const doc = new jspdf({
-      orientation: canvas.width > canvas.height ? 'l' : 'p',
-      unit: 'pt',
-      format: [canvas.width, canvas.height],
-    });
-    doc.addImage(canvas, 'PNG', 0, 0, canvas.width, canvas.height, 'NONE');
-    doc.save('topola.pdf');
-  }
 }
-export const Chart = injectIntl(ChartComponent, {forwardRef: true});
+
+function usePrevious<T>(value: T): T | undefined {
+  const ref = useRef<T>();
+  useEffect(() => {
+    ref.current = value;
+  });
+  return ref.current;
+}
+
+export function Chart(props: ChartProps) {
+  const chartWrapper = useRef(new ChartWrapper());
+  const prevProps = usePrevious(props);
+  const intl = useIntl();
+
+  useEffect(() => {
+    if (prevProps) {
+      const initialRender =
+        props.chartType !== prevProps?.chartType ||
+        props.colors !== prevProps?.colors;
+      const resetPosition =
+        props.chartType !== prevProps?.chartType ||
+        props.data !== prevProps.data ||
+        props.selection !== prevProps.selection;
+      chartWrapper.current.renderChart(props, intl, {
+        initialRender,
+        resetPosition,
+      });
+    } else {
+      chartWrapper.current.renderChart(props, intl, {
+        initialRender: true,
+        resetPosition: true,
+      });
+    }
+  });
+
+  return (
+    <div id="svgContainer">
+      <Media greaterThanOrEqual="large" className="zoom">
+        <button
+          className="zoom-in"
+          onClick={() => chartWrapper.current.zoom(ZOOM_FACTOR)}
+        >
+          +
+        </button>
+        <button
+          className="zoom-out"
+          onClick={() => chartWrapper.current.zoom(1 / ZOOM_FACTOR)}
+        >
+          −
+        </button>
+      </Media>
+      <svg id="chartSvg">
+        <g id="chart" />
+      </svg>
+    </div>
+  );
+}

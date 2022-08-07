@@ -1,0 +1,28 @@
+name: Deploy to WikiTree Apps
+
+on: workflow_dispatch
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Use Node.js
+      uses: actions/setup-node@v2
+      with:
+        node-version: 16.x
+        cache: 'npm'
+    - run: npm ci
+    - run: npm run build
+    - run: npm test
+    - run: npm run cy:start-and-run
+    - name: Install lftp
+      run: sudo apt-get install -y lftp
+    - name: Set up ssh
+      run: |
+        mkdir ~/.ssh
+        echo 'apps.wikitree.com,18.233.253.116 ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCKTIpheJq3YwWPqfKIMP+y4/ctpZwBcsEE0OoE4LYDbDckV57kGICKxuQi76t5sJIOTO9zhbZy5wbXNDIB1REM=' >> ~/.ssh/known_hosts
+    - run: npm run deploy-wikitree
+      env:
+        LFTP_PASSWORD: ${{ secrets.WIKITREE_PASSWORD }}
