@@ -1,5 +1,22 @@
 # Changelog
 
+## 2023-02-01
+
+- Added option to hide sex indicators (by Kent Grigo)
+- Empty family boxes are now not shown (by Kent Grigo)
+
+## 2023-01-08
+
+- Added option to hide profile identifiers by Kent Grigo
+
+## 2022-12-08
+
+- French translation updated by Olivier Berten
+
+## 2022-08-30
+
+- Added displaying name types in details panel
+
 ## 2022-05-13
 
 - Added displaying images in the details panel

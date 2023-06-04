@@ -16,6 +16,7 @@ import {TopBar} from './menu/top_bar';
 import {TopolaData} from './util/gedcom_util';
 import {useEffect, useState} from 'react';
 import {useHistory, useLocation} from 'react-router';
+import {idToIndiMap} from './util/gedcom_util';
 import {
   Chart,
   ChartType,
@@ -30,6 +31,8 @@ import {
   ConfigPanel,
   configToArgs,
   DEFALUT_CONFIG,
+  Ids,
+  Sex,
 } from './config';
 import {
   getSelection,
@@ -105,6 +108,7 @@ interface Arguments {
   selection?: IndiInfo;
   chartType: ChartType;
   standalone: boolean;
+  showWikiTreeMenus: boolean;
   freezeAnimation: boolean;
   showSidePanel: boolean;
   config: Config;
@@ -167,6 +171,7 @@ function getArguments(location: H.Location<any>): Arguments {
 
     showSidePanel: getParam('sidePanel') !== 'false', // True by default.
     standalone: getParam('standalone') !== 'false' && !embedded,
+    showWikiTreeMenus: getParam('showWikiTreeMenus') !== 'false', // True by default.
     freezeAnimation: getParam('freeze') === 'true', // False by default
     config: argsToConfig(search),
   };
@@ -185,6 +190,11 @@ export function App() {
   const [showSidePanel, setShowSidePanel] = useState(false);
   /** Whether the app is in standalone mode, i.e. showing 'open file' menus. */
   const [standalone, setStandalone] = useState(true);
+  /**
+   * Whether the app should display WikiTree-specific menus when showing data
+   * from WikiTree.
+   */
+  const [showWikiTreeMenus, setShowWikiTreeMenus] = useState(true);
   /** Type of displayed chart. */
   const [chartType, setChartType] = useState<ChartType>(ChartType.Hourglass);
   /** Whether to show the error popup. */
@@ -208,6 +218,19 @@ export function App() {
     ) {
       setSelection(newSelection);
     }
+  }
+
+  function toggleDetails(config: Config, data: TopolaData | undefined) {
+    if (data === undefined) {
+      return;
+    }
+    let shouldHideIds = config.id === Ids.HIDE;
+    let shouldHideSex = config.sex === Sex.HIDE;
+    let indiMap = idToIndiMap(data.chartData);
+    indiMap.forEach((indi) => {
+      indi.hideId = shouldHideIds;
+      indi.hideSex = shouldHideSex;
+    });
   }
 
   /** Sets error message after data load failure. */
@@ -310,6 +333,7 @@ export function App() {
         setSourceSpec(args.sourceSpec);
         setSelection(args.selection);
         setStandalone(args.standalone);
+        setShowWikiTreeMenus(args.showWikiTreeMenus);
         setChartType(args.chartType);
         setFreezeAnimation(args.freezeAnimation);
         setConfig(args.config);
@@ -317,7 +341,7 @@ export function App() {
           const data = await loadData(args.sourceSpec, args.selection);
           // Set state with data.
           setData(data);
-          setSelection(getSelection(data.chartData, args.selection));
+          toggleDetails(args.config, data);
           setShowSidePanel(args.showSidePanel);
           setState(AppState.SHOWING_CHART);
         } catch (error: any) {
@@ -328,15 +352,14 @@ export function App() {
         state === AppState.LOADING_MORE
       ) {
         // Update selection if it has changed in the URL.
-        const newSelection = getSelection(data!.chartData, args.selection);
         const loadMoreFromWikitree =
           args.sourceSpec.source === DataSourceEnum.WIKITREE &&
-          (!selection || selection.id !== newSelection.id);
+          (!selection || selection.id !== args.selection?.id);
         setChartType(args.chartType);
         setState(
           loadMoreFromWikitree ? AppState.LOADING_MORE : AppState.SHOWING_CHART,
         );
-        updateDisplay(newSelection);
+        updateDisplay(args.selection!);
         if (loadMoreFromWikitree) {
           try {
             const data = await loadWikiTree(args.selection!.id, intl);
@@ -441,6 +464,7 @@ export function App() {
     switch (state) {
       case AppState.SHOWING_CHART:
       case AppState.LOADING_MORE:
+        const updatedSelection = getSelection(data!.chartData, selection);
         const sidePanelTabs = [
           {
             menuItem: intl.formatMessage({
@@ -448,7 +472,7 @@ export function App() {
               defaultMessage: 'Info',
             }),
             render: () => (
-              <Details gedcom={data!.gedcom} indi={selection!.id} />
+              <Details gedcom={data!.gedcom} indi={updatedSelection.id} />
             ),
           },
           {
@@ -461,6 +485,7 @@ export function App() {
                 config={config}
                 onChange={(config) => {
                   setConfig(config);
+                  toggleDetails(config, data);
                   updateUrl(configToArgs(config));
                 }}
               />
@@ -479,11 +504,13 @@ export function App() {
             ) : null}
             <Chart
               data={data!.chartData}
-              selection={selection!}
+              selection={updatedSelection}
               chartType={chartType}
               onSelection={onSelection}
               freezeAnimation={freezeAnimation}
               colors={config.color}
+              hideIds={config.id}
+              hideSex={config.sex}
             />
             {showSidePanel ? (
               <Media greaterThanOrEqual="large" className="sidePanel">
@@ -525,7 +552,10 @@ export function App() {
               onDownloadPng,
               onDownloadSvg,
             }}
-            showWikiTreeMenus={sourceSpec?.source === DataSourceEnum.WIKITREE}
+            showWikiTreeMenus={
+              sourceSpec?.source === DataSourceEnum.WIKITREE &&
+              showWikiTreeMenus
+            }
           />
         )}
       />
